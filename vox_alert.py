@@ -14,8 +14,6 @@ from selenium.webdriver.common.by import By
 # SETTINGS
 # ============================================================
 
-CHAT_ID = "762509099"
-
 TARGET_DATE = "20260814"
 CINEMA = "city-centre-almaza"
 
@@ -27,51 +25,323 @@ MOVIES = {
 VOX_BASE = "https://egy.voxcinemas.com/showtimes"
 
 STATE_FILE = Path("alert_state.json")
+SUBSCRIBERS_FILE = Path("subscribers.json")
+TELEGRAM_OFFSET_FILE = Path("telegram_offset.txt")
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def send_telegram(message):
+def get_bot_token():
 
     token = os.environ.get("VOX_BOT_TOKEN")
 
     if not token:
         print("ERROR: VOX_BOT_TOKEN is not set.")
-        return False
+        return None
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    return token
+
+
+def telegram_request(method, params=None):
+
+    token = get_bot_token()
+
+    if not token:
+        return None
+
+    url = f"https://api.telegram.org/bot{token}/{method}"
 
     try:
+
         response = requests.post(
             url,
-            data={
-                "chat_id": CHAT_ID,
-                "text": message,
-            },
+            data=params or {},
             timeout=20,
         )
 
         if response.ok:
-            print("Telegram notification sent.")
-            return True
+            return response.json()
 
-        print("Telegram error:", response.text)
-        return False
+        print(
+            f"Telegram API error ({method}):",
+            response.text,
+        )
+
+        return None
 
     except Exception as e:
-        print("Telegram error:", e)
-        return False
+
+        print(
+            f"Telegram connection error ({method}):",
+            e,
+        )
+
+        return None
+
+
+def send_telegram(chat_id, message):
+
+    result = telegram_request(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": message,
+        },
+    )
+
+    if result and result.get("ok"):
+
+        print(
+            f"Telegram notification sent to {chat_id}."
+        )
+
+        return True
+
+    return False
 
 
 # ============================================================
-# STATE
+# SUBSCRIBERS
+# ============================================================
+
+def load_subscribers():
+
+    if not SUBSCRIBERS_FILE.exists():
+
+        # Your existing Telegram chat ID.
+        return ["762509099"]
+
+    try:
+
+        with open(
+            SUBSCRIBERS_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
+
+            subscribers = json.load(f)
+
+            if not isinstance(subscribers, list):
+                return ["762509099"]
+
+            return subscribers
+
+    except Exception:
+
+        return ["762509099"]
+
+
+def save_subscribers(subscribers):
+
+    # Remove duplicate IDs.
+    subscribers = list(
+        dict.fromkeys(
+            str(x) for x in subscribers
+        )
+    )
+
+    with open(
+        SUBSCRIBERS_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            subscribers,
+            f,
+            indent=2,
+        )
+
+
+# ============================================================
+# TELEGRAM /START HANDLER
+# ============================================================
+
+def load_telegram_offset():
+
+    if not TELEGRAM_OFFSET_FILE.exists():
+        return None
+
+    try:
+
+        with open(
+            TELEGRAM_OFFSET_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
+
+            return int(
+                f.read().strip()
+            )
+
+    except Exception:
+
+        return None
+
+
+def save_telegram_offset(offset):
+
+    with open(
+        TELEGRAM_OFFSET_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        f.write(str(offset))
+
+
+def process_telegram_commands():
+
+    print()
+    print(
+        "Checking Telegram for new /start messages..."
+    )
+
+    subscribers = load_subscribers()
+
+    offset = load_telegram_offset()
+
+    params = {
+        "timeout": 1,
+        "allowed_updates": json.dumps(
+            ["message"]
+        ),
+    }
+
+    if offset is not None:
+        params["offset"] = offset
+
+    result = telegram_request(
+        "getUpdates",
+        params,
+    )
+
+    if not result or not result.get("ok"):
+
+        print(
+            "Could not retrieve Telegram updates."
+        )
+
+        return subscribers, False
+
+    updates = result.get(
+        "result",
+        [],
+    )
+
+    if not updates:
+
+        print(
+            "No new Telegram messages."
+        )
+
+        return subscribers, False
+
+    changed = False
+
+    for update in updates:
+
+        # Advance the offset so this update
+        # won't be processed again.
+        update_id = update.get(
+            "update_id"
+        )
+
+        if update_id is not None:
+
+            save_telegram_offset(
+                update_id + 1
+            )
+
+        message = update.get("message")
+
+        if not message:
+            continue
+
+        text = message.get(
+            "text",
+            "",
+        ).strip().lower()
+
+        chat = message.get("chat")
+
+        if not chat:
+            continue
+
+        chat_id = str(
+            chat.get("id")
+        )
+
+        print(
+            f"Received message "
+            f"from {chat_id}: {text}"
+        )
+
+        # ----------------------------------------------------
+        # ONLY COMMAND WE SUPPORT
+        # ----------------------------------------------------
+
+        if text == "/start":
+
+            print(
+                f"New /start from chat {chat_id}"
+            )
+
+            if chat_id not in subscribers:
+
+                subscribers.append(chat_id)
+
+                changed = True
+
+                welcome_message = (
+                    "👋 Welcome to VOX Almaza Alert!\n\n"
+                    "✅ This bot is now active for you.\n\n"
+                    "🎬 The Odyssey\n"
+                    "🕷️ Spider-Man: Brand New Day\n\n"
+                    "📅 We're monitoring "
+                    "Friday, August 14, 2026\n"
+                    "📍 City Centre Almaza\n\n"
+                    "🔔 You'll receive a notification "
+                    "as soon as the date becomes "
+                    "available for booking.\n\n"
+                    "🍿 Good luck!"
+                )
+
+                send_telegram(
+                    chat_id,
+                    welcome_message,
+                )
+
+            else:
+
+                print(
+                    f"Chat {chat_id} is already subscribed."
+                )
+
+    if changed:
+
+        save_subscribers(
+            subscribers
+        )
+
+        print(
+            f"Subscribers updated: "
+            f"{len(subscribers)}"
+        )
+
+    return subscribers, changed
+
+
+# ============================================================
+# ALERT STATE
 # ============================================================
 
 def load_state():
 
     if not STATE_FILE.exists():
+
         return {
             "The Odyssey": False,
             "Spider-Man: Brand New Day": False,
@@ -79,7 +349,12 @@ def load_state():
 
     try:
 
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
+
             return json.load(f)
 
     except Exception:
@@ -92,8 +367,17 @@ def load_state():
 
 def save_state(state):
 
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    with open(
+        STATE_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            state,
+            f,
+            indent=2,
+        )
 
 
 # ============================================================
@@ -113,7 +397,9 @@ def create_driver():
     options.add_argument("--disable-gpu")
 
     # Normal desktop browser size.
-    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "--window-size=1920,1080"
+    )
 
     # Make Chrome look like a normal browser.
     options.add_argument(
@@ -125,7 +411,9 @@ def create_driver():
     # Don't wait for every image/analytics resource.
     options.page_load_strategy = "eager"
 
-    driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(
+        options=options
+    )
 
     driver.set_page_load_timeout(60)
 
@@ -146,26 +434,30 @@ def check_movie(movie_name, movie_slug):
     )
 
     print()
-    print(f"Checking {movie_name}...")
-    print(f"URL: {url}")
+    print(
+        f"Checking {movie_name}..."
+    )
 
-    # --------------------------------------------------------
-    # We give each movie its own Chrome session.
-    # This helps prevent VOX from behaving differently on
-    # the second movie because of the previous page/session.
-    # --------------------------------------------------------
+    print(
+        f"URL: {url}"
+    )
 
+    # Each movie gets its own Chrome session.
     driver = None
 
     try:
 
-        print("Starting fresh Chrome session...")
+        print(
+            "Starting fresh Chrome session..."
+        )
 
         driver = create_driver()
 
-        print("Chrome started successfully.")
+        print(
+            "Chrome started successfully."
+        )
 
-        # Try the page twice if VOX gives us an ambiguous result.
+        # Try twice if VOX gives us an ambiguous result.
         for attempt in range(1, 3):
 
             print(
@@ -186,18 +478,22 @@ def check_movie(movie_name, movie_slug):
                 if attempt == 2:
                     return None
 
-                print("Retrying in 5 seconds...")
+                print(
+                    "Retrying in 5 seconds..."
+                )
+
                 time.sleep(5)
+
                 continue
 
-            # Give VOX's JavaScript a little time to render.
+            # Give VOX JavaScript time to render.
             time.sleep(5)
 
             try:
 
                 body_text = driver.find_element(
                     By.TAG_NAME,
-                    "body"
+                    "body",
                 ).text
 
             except Exception as e:
@@ -210,16 +506,26 @@ def check_movie(movie_name, movie_slug):
                     return None
 
                 time.sleep(5)
+
                 continue
 
-            print("Chrome loaded the VOX page.")
-            print("Page title:", driver.title)
+            print(
+                "Chrome loaded the VOX page."
+            )
+
+            print(
+                "Page title:",
+                driver.title,
+            )
 
             # ------------------------------------------------
             # CONFIRMED UNAVAILABLE
             # ------------------------------------------------
 
-            if "No showtimes could be found" in body_text:
+            if (
+                "No showtimes could be found"
+                in body_text
+            ):
 
                 print(
                     f"❌ {movie_name}: "
@@ -233,7 +539,8 @@ def check_movie(movie_name, movie_slug):
             # ------------------------------------------------
 
             times = re.findall(
-                r"\b\d{1,2}:\d{2}\s*(?:am|pm)\b",
+                r"\b\d{1,2}:\d{2}\s*"
+                r"(?:am|pm)\b",
                 body_text,
                 re.IGNORECASE,
             )
@@ -247,38 +554,42 @@ def check_movie(movie_name, movie_slug):
 
                 print(
                     "Showtimes found:",
-                    ", ".join(times[:20])
+                    ", ".join(times[:20]),
                 )
 
                 return True
 
             # ------------------------------------------------
-            # CHECK FOR OTHER STRONG AVAILABILITY SIGNALS
+            # OTHER AVAILABILITY SIGNALS
             # ------------------------------------------------
 
             body_lower = body_text.lower()
 
             movie_present = (
-                movie_name.lower() in body_lower
+                movie_name.lower()
+                in body_lower
             )
 
             view_times_present = (
-                "view times and book" in body_lower
+                "view times and book"
+                in body_lower
             )
 
-            # If the movie is clearly present but no times
-            # were found, we still don't assume unavailable.
-            if movie_present and view_times_present:
+            if (
+                movie_present
+                and view_times_present
+            ):
 
                 print(
-                    "⚠️ VOX page loaded, but no showtimes "
-                    "were found yet."
+                    "⚠️ VOX page loaded, "
+                    "but no showtimes were found yet."
                 )
 
                 if attempt == 2:
 
                     print(
-                        "This is NOT treated as unavailable."
+                        "This is NOT treated "
+                        "as unavailable."
                     )
 
                     return None
@@ -286,11 +597,13 @@ def check_movie(movie_name, movie_slug):
             else:
 
                 print(
-                    "⚠️ VOX returned an ambiguous page."
+                    "⚠️ VOX returned an "
+                    "ambiguous page."
                 )
 
                 print(
-                    "This is NOT treated as unavailable."
+                    "This is NOT treated "
+                    "as unavailable."
                 )
 
                 if attempt == 2:
@@ -316,7 +629,8 @@ def check_movie(movie_name, movie_slug):
         )
 
         print(
-            "This is NOT treated as unavailable."
+            "This is NOT treated "
+            "as unavailable."
         )
 
         return None
@@ -325,7 +639,9 @@ def check_movie(movie_name, movie_slug):
 
         if driver:
 
-            print("Closing Chrome...")
+            print(
+                "Closing Chrome..."
+            )
 
             try:
                 driver.quit()
@@ -340,14 +656,43 @@ def check_movie(movie_name, movie_slug):
 def main():
 
     print("=" * 60)
-    print("VOX ALERT - SELENIUM CHECK")
-    print("=" * 60)
 
-    print("Target date: August 14, 2026")
-    print("Cinema: City Centre Almaza")
-    print("Check interval: Every 10 minutes")
+    print(
+        "VOX ALERT - SELENIUM CHECK"
+    )
 
     print("=" * 60)
+
+    print(
+        "Target date: August 14, 2026"
+    )
+
+    print(
+        "Cinema: City Centre Almaza"
+    )
+
+    print(
+        "Check interval: Every 10 minutes"
+    )
+
+    print("=" * 60)
+
+    # --------------------------------------------------------
+    # FIRST: CHECK TELEGRAM
+    # --------------------------------------------------------
+
+    subscribers, subscribers_changed = (
+        process_telegram_commands()
+    )
+
+    print(
+        f"Current subscribers: "
+        f"{len(subscribers)}"
+    )
+
+    # --------------------------------------------------------
+    # THEN: CHECK VOX
+    # --------------------------------------------------------
 
     state = load_state()
 
@@ -357,7 +702,7 @@ def main():
 
         result = check_movie(
             movie_name,
-            movie_slug
+            movie_slug,
         )
 
         # ----------------------------------------------------
@@ -366,7 +711,10 @@ def main():
 
         if result is True:
 
-            if not state.get(movie_name, False):
+            if not state.get(
+                movie_name,
+                False,
+            ):
 
                 message = (
                     "🚨 VOX ALERT! 🚨\n\n"
@@ -378,9 +726,29 @@ def main():
                     "👉 Open VOX and book it now."
                 )
 
-                if send_telegram(message):
+                successful_sends = 0
+
+                for chat_id in subscribers:
+
+                    if send_telegram(
+                        chat_id,
+                        message,
+                    ):
+
+                        successful_sends += 1
+
+                print(
+                    f"Alert sent to "
+                    f"{successful_sends}/"
+                    f"{len(subscribers)} subscribers."
+                )
+
+                # Mark as alerted only after at least
+                # one notification was successfully sent.
+                if successful_sends > 0:
 
                     state[movie_name] = True
+
                     state_changed = True
 
             else:
@@ -419,13 +787,28 @@ def main():
     save_state(state)
 
     print()
-    print("=" * 60)
-    print("Check complete.")
+
     print("=" * 60)
 
+    print(
+        "Check complete."
+    )
+
+    print("=" * 60)
+
+    if subscribers_changed:
+
+        print(
+            "Subscriber list updated."
+        )
+
     if state_changed:
-        print("Alert state updated.")
+
+        print(
+            "Alert state updated."
+        )
 
 
 if __name__ == "__main__":
+
     main()
