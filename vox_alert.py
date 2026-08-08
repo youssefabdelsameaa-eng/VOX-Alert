@@ -14,7 +14,7 @@ from selenium.webdriver.common.by import By
 # SETTINGS
 # ============================================================
 
-TARGET_DATE = "20260812"
+TARGET_DATE = "20260814"
 CINEMA = "city-centre-almaza"
 
 MOVIES = {
