@@ -38,7 +38,15 @@ jobs:
           git config user.name "VOX Alert Bot"
           git config user.email "vox-alert-bot@users.noreply.github.com"
 
-          git add alert_state.json subscribers.json telegram_offset.txt
+          git add alert_state.json
+
+          if [ -f subscribers.json ]; then
+            git add subscribers.json
+          fi
+
+          if [ -f telegram_offset.txt ]; then
+            git add telegram_offset.txt
+          fi
 
           if git diff --cached --quiet; then
             echo "No state changes."
