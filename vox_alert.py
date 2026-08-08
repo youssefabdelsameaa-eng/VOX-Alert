@@ -4,6 +4,10 @@ import re
 from pathlib import Path
 
 import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
 
 
 # ============================================================
@@ -23,28 +27,6 @@ MOVIES = {
 VOX_BASE = "https://egy.voxcinemas.com/showtimes"
 
 STATE_FILE = Path("alert_state.json")
-
-
-# ============================================================
-# HTTP
-# ============================================================
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/150.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://egy.voxcinemas.com/",
-}
-
-session = requests.Session()
-session.headers.update(HEADERS)
 
 
 # ============================================================
@@ -113,10 +95,44 @@ def save_state(state):
 
 
 # ============================================================
+# SELENIUM
+# ============================================================
+
+def create_driver():
+
+    options = Options()
+
+    # Run Chrome without opening a visible browser window.
+    options.add_argument("--headless=new")
+
+    # Required for GitHub's Linux environment.
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+
+    # Make the browser look like a normal desktop browser.
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/150.0.0.0 Safari/537.36"
+    )
+
+    # Don't wait unnecessarily for every resource.
+    options.page_load_strategy = "eager"
+
+    driver = webdriver.Chrome(options=options)
+
+    driver.set_page_load_timeout(45)
+
+    return driver
+
+
+# ============================================================
 # VOX CHECK
 # ============================================================
 
-def check_movie(movie_name, movie_slug):
+def check_movie(driver, movie_name, movie_slug):
 
     url = (
         f"{VOX_BASE}"
@@ -125,97 +141,89 @@ def check_movie(movie_name, movie_slug):
         f"&d={TARGET_DATE}"
     )
 
-    print(f"\nChecking {movie_name}...")
+    print()
+    print(f"Checking {movie_name}...")
+    print(f"URL: {url}")
 
-    for attempt in range(1, 4):
+    try:
 
-        try:
+        driver.get(url)
 
-            print(f"VOX request attempt {attempt}/3...")
+        print("Chrome loaded the VOX page.")
 
-            response = session.get(
-                url,
-                timeout=30,
-            )
+        # Give the page a chance to finish loading its content.
+        WebDriverWait(driver, 30).until(
+            lambda d: d.find_element(By.TAG_NAME, "body")
+        )
 
-            print(f"VOX response: HTTP {response.status_code}")
+        body_text = driver.find_element(
+            By.TAG_NAME,
+            "body"
+        ).text
 
-            if response.status_code != 200:
+        print("Page title:", driver.title)
 
-                print(
-                    f"⚠️ VOX returned HTTP {response.status_code}"
-                )
+        # ----------------------------------------------------
+        # Confirmed unavailable
+        # ----------------------------------------------------
 
-                continue
-
-            page = response.text
-
-            # ------------------------------------------------
-            # Confirmed NOT available
-            # ------------------------------------------------
-
-            if "No showtimes could be found" in page:
-
-                print(
-                    f"❌ {movie_name}: August 14 is NOT available yet."
-                )
-
-                return False
-
-            # ------------------------------------------------
-            # Look for actual showtime-looking values.
-            #
-            # Examples:
-            # 11:15am
-            # 3:00pm
-            # 10:30pm
-            # ------------------------------------------------
-
-            times = re.findall(
-                r"\b\d{1,2}:\d{2}\s*(?:am|pm)\b",
-                page,
-                re.IGNORECASE,
-            )
-
-            if times:
-
-                print(
-                    f"🚨 {movie_name}: AUGUST 14 IS AVAILABLE!"
-                )
-
-                print(
-                    "Showtime indicators found:",
-                    ", ".join(times[:10])
-                )
-
-                return True
-
-            # ------------------------------------------------
-            # We got a page, but cannot confidently determine
-            # availability.
-            # ------------------------------------------------
+        if "No showtimes could be found" in body_text:
 
             print(
-                "⚠️ VOX responded, but availability could not "
-                "be determined."
+                f"❌ {movie_name}: "
+                "August 14 is NOT available yet."
+            )
+
+            return False
+
+        # ----------------------------------------------------
+        # Look for showtime values.
+        # ----------------------------------------------------
+
+        times = re.findall(
+            r"\b\d{1,2}:\d{2}\s*(?:am|pm)\b",
+            body_text,
+            re.IGNORECASE,
+        )
+
+        if times:
+
+            print(
+                f"🚨 {movie_name}: "
+                "AUGUST 14 IS AVAILABLE!"
             )
 
             print(
-                "This is NOT treated as unavailable."
+                "Showtimes found:",
+                ", ".join(times[:20])
             )
 
-            return None
+            return True
 
-        except requests.exceptions.RequestException as e:
+        # ----------------------------------------------------
+        # Page loaded but status unclear.
+        # ----------------------------------------------------
 
-            print(
-                f"⚠️ VOX request failed: {e}"
-            )
+        print(
+            "⚠️ VOX page loaded, but I could not "
+            "confidently determine availability."
+        )
 
-    print("❌ Could not reach VOX.")
-    print("This is NOT treated as unavailable.")
+        print("This is NOT treated as unavailable.")
 
-    return None
+        return None
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Selenium/VOX error: {type(e).__name__}: {e}"
+        )
+
+        print(
+            "This is NOT treated as unavailable."
+        )
+
+        return None
 
 
 # ============================================================
@@ -225,73 +233,96 @@ def check_movie(movie_name, movie_slug):
 def main():
 
     print("=" * 60)
-    print("VOX ALERT - GITHUB CHECK")
+    print("VOX ALERT - SELENIUM CHECK")
     print("=" * 60)
+
     print("Target date: August 14, 2026")
     print("Cinema: City Centre Almaza")
+
     print("=" * 60)
 
     state = load_state()
-
     state_changed = False
 
-    for movie_name, movie_slug in MOVIES.items():
+    driver = None
 
-        result = check_movie(
-            movie_name,
-            movie_slug
-        )
+    try:
 
-        # ----------------------------------------------------
-        # Available
-        # ----------------------------------------------------
+        print()
+        print("Starting Chrome...")
 
-        if result is True:
+        driver = create_driver()
 
-            # Only notify if we haven't already notified
-            # about this movie.
+        print("Chrome started successfully.")
 
-            if not state.get(movie_name, False):
+        for movie_name, movie_slug in MOVIES.items():
 
-                message = (
-                    "🚨 VOX ALERT! 🚨\n\n"
-                    f"🎬 {movie_name}\n"
-                    "📅 Friday, August 14, 2026\n"
-                    "📍 City Centre Almaza\n\n"
-                    "The date is NOW AVAILABLE for booking!\n\n"
-                    "👉 Open VOX and book it now."
+            result = check_movie(
+                driver,
+                movie_name,
+                movie_slug
+            )
+
+            # ------------------------------------------------
+            # Available
+            # ------------------------------------------------
+
+            if result is True:
+
+                if not state.get(movie_name, False):
+
+                    message = (
+                        "🚨 VOX ALERT! 🚨\n\n"
+                        f"🎬 {movie_name}\n"
+                        "📅 Friday, August 14, 2026\n"
+                        "📍 City Centre Almaza\n\n"
+                        "The date is NOW AVAILABLE "
+                        "for booking!\n\n"
+                        "👉 Open VOX and book it now."
+                    )
+
+                    if send_telegram(message):
+
+                        state[movie_name] = True
+                        state_changed = True
+
+                else:
+
+                    print(
+                        f"Already notified about "
+                        f"{movie_name}."
+                    )
+
+            # ------------------------------------------------
+            # Confirmed unavailable
+            # ------------------------------------------------
+
+            elif result is False:
+
+                print(
+                    f"{movie_name}: still waiting "
+                    "for August 14."
                 )
 
-                if send_telegram(message):
-
-                    state[movie_name] = True
-                    state_changed = True
+            # ------------------------------------------------
+            # Unknown / failed
+            # ------------------------------------------------
 
             else:
 
                 print(
-                    f"Already notified about {movie_name}."
+                    f"{movie_name}: unable to "
+                    "determine status."
                 )
 
-        # ----------------------------------------------------
-        # Confirmed unavailable
-        # ----------------------------------------------------
+    finally:
 
-        elif result is False:
+        if driver:
 
-            print(
-                f"{movie_name}: still waiting for August 14."
-            )
+            print()
+            print("Closing Chrome...")
 
-        # ----------------------------------------------------
-        # Unknown / connection problem
-        # ----------------------------------------------------
-
-        else:
-
-            print(
-                f"{movie_name}: unable to determine status."
-            )
+            driver.quit()
 
     # --------------------------------------------------------
     # Save state
@@ -306,8 +337,6 @@ def main():
 
     if state_changed:
         print("Alert state updated.")
-
-    print("GitHub Actions will run the next check automatically.")
 
 
 if __name__ == "__main__":
